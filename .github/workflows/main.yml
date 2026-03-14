@@ -1,0 +1,74 @@
+# .github/workflows/sync-to-hf.yml
+name: Build, Test & Sync to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linting tools
+        run: pip install ruff
+
+      - name: Lint & check for errors
+        run: |
+          ruff check . --select E,F
+
+      - name: Build Dockerfile
+        run: docker build -t hf-space-app .
+
+      - name: Run tests (if available)
+        run: |
+          if [ -f "pytest.ini" ] || [ -f "setup.cfg" ] || [ -d "tests" ] || [ -d "test" ]; then
+            echo "Python tests detected — running pytest"
+            docker run --rm hf-space-app pytest
+          elif [ -f "package.json" ] && grep -q '"test"' package.json; then
+            echo "Node tests detected — running npm test"
+            docker run --rm hf-space-app npm test
+          else
+            echo "No tests found, skipping"
+          fi
+
+  sync:
+    runs-on: ubuntu-latest
+    needs: build-and-test  # only sync if build + tests pass
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Sync with Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+        run: |
+          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_REPO_ID} /tmp/hf-space
+
+          rsync -av \
+            --exclude='.git' \
+            --exclude='README.md' \
+            --exclude='.gitattributes' \
+            $GITHUB_WORKSPACE/ /tmp/hf-space/
+
+          cd /tmp/hf-space
+          git config user.email "ci@github.com"
+          git config user.name "GitHub CI"
+          git add .
+          git diff --cached --quiet || git commit -m "sync from GitHub @ ${{ github.sha }}"
+          git push
